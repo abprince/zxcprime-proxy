@@ -3,99 +3,109 @@ from flask_cors import CORS
 import requests
 import re
 import json
-import time
-from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
 CORS(app)
 
-# ✅ Updated domains (keeping your original structure)
 DOMAINS = [
-    'zxcprime.xyz',      # ✅ Added this as primary
-    'zxcstream.xyz',     # ✅ Kept as fallback
+    'zxcprime.xyz',
+    'zxcstream.xyz',
 ]
 
 def extract_video_url(html_content):
-    # Look for video URLs in the page
+    # Try multiple patterns
     patterns = [
+        # Direct video URLs
         r'https?://[^"\']*\.mp4[^"\']*',
         r'https?://[^"\']*\.m3u8[^"\']*',
+        r'https?://[^"\']*\.ts[^"\']*',
+        # Cloudflare workers
         r'https?://[^"\']*workers\.dev[^"\']*',
         r'https?://[^"\']*icarus[^"\']*',
-        r'https?://[^"\']*\.ts[^"\']*',
+        # Any video URL in the page
+        r'https?://[^"\']*(?:video|stream|play)[^"\']*',
+        # JSON data containing video URL
+        r'"videoUrl"\s*:\s*"([^"]+)"',
+        r'"url"\s*:\s*"([^"]+)"',
+        r'"source"\s*:\s*"([^"]+)"',
     ]
     
     for pattern in patterns:
         matches = re.findall(pattern, html_content)
         if matches:
-            return matches[0]
+            # Return the first match (if it's a group match, use the group)
+            if isinstance(matches[0], tuple):
+                for match in matches:
+                    for group in match:
+                        if group and (group.startswith('http://') or group.startswith('https://')):
+                            return group
+            else:
+                url = matches[0]
+                if url.startswith('http://') or url.startswith('https://'):
+                    return url
     
-    # Try to find video URL in script tags
+    # Try to find in script tags
     script_pattern = r'<script[^>]*>(.*?)</script>'
     scripts = re.findall(script_pattern, html_content, re.DOTALL)
     for script in scripts:
         for pattern in patterns:
             matches = re.findall(pattern, script)
             if matches:
-                return matches[0]
+                if isinstance(matches[0], tuple):
+                    for match in matches:
+                        for group in match:
+                            if group and (group.startswith('http://') or group.startswith('https://')):
+                                return group
+                else:
+                    url = matches[0]
+                    if url.startswith('http://') or url.startswith('https://'):
+                        return url
     
     return None
 
 def fetch_video(media_type, media_id, season=1, episode=1):
-    # ✅ Try each domain
     for domain in DOMAINS:
         try:
-            # Build the URL
+            # Try player URL
             if media_type == 'movie':
-                url = f'https://{domain}/player/movie/{media_id}'
+                urls_to_try = [
+                    f'https://{domain}/player/movie/{media_id}',
+                    f'https://{domain}/embed/movie/{media_id}',
+                ]
             else:
-                url = f'https://{domain}/player/tv/{media_id}/{season}/{episode}'
+                urls_to_try = [
+                    f'https://{domain}/player/tv/{media_id}/{season}/{episode}',
+                    f'https://{domain}/embed/tv/{media_id}/{season}/{episode}',
+                ]
             
-            print(f'🔍 Fetching from: {url}')
-            
-            # Make request with browser headers
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Referer': f'https://{domain}/',
-                'Origin': f'https://{domain}',
-            }
-            
-            response = requests.get(url, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                video_url = extract_video_url(response.text)
-                if video_url:
-                    print(f'✅ Found video URL from {domain}: {video_url}')
-                    return {
-                        'success': True,
-                        'videoUrl': video_url,
-                        'domain': domain,
-                        'title': f'{media_type} {media_id}'
-                    }
-            
-            # ✅ Try embed URL as fallback
-            if media_type == 'movie':
-                embed_url = f'https://{domain}/embed/movie/{media_id}'
-            else:
-                embed_url = f'https://{domain}/embed/tv/{media_id}/{season}/{episode}'
-            
-            print(f'🔄 Trying embed: {embed_url}')
-            embed_response = requests.get(embed_url, headers=headers, timeout=30)
-            
-            if embed_response.status_code == 200:
-                video_url = extract_video_url(embed_response.text)
-                if video_url:
-                    print(f'✅ Found video URL from {domain} (embed): {video_url}')
-                    return {
-                        'success': True,
-                        'videoUrl': video_url,
-                        'domain': domain,
-                        'title': f'{media_type} {media_id}',
-                        'source': 'embed'
-                    }
-                    
+            for url in urls_to_try:
+                print(f'🔍 Fetching: {url}')
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Referer': f'https://{domain}/',
+                    'Origin': f'https://{domain}',
+                }
+                
+                response = requests.get(url, headers=headers, timeout=30)
+                
+                if response.status_code == 200:
+                    video_url = extract_video_url(response.text)
+                    if video_url:
+                        print(f'✅ Found video URL: {video_url}')
+                        return {
+                            'success': True,
+                            'videoUrl': video_url,
+                            'domain': domain,
+                            'title': f'{media_type} {media_id}'
+                        }
+                    else:
+                        # Save the page for debugging
+                        print(f'⚠️ No video URL found on {url}')
+                        print(f'📄 Page preview: {response.text[:500]}...')
+                        
         except Exception as e:
             print(f'❌ Error with {domain}: {e}')
             continue
@@ -106,17 +116,25 @@ def fetch_video(media_type, media_id, season=1, episode=1):
 def get_video():
     media_type = request.args.get('type', 'movie')
     media_id = request.args.get('id')
-    season = int(request.args.get('season', 1))
-    episode = int(request.args.get('episode', 1))
+    season = request.args.get('season', 1)
+    episode = request.args.get('episode', 1)
     
     if not media_id:
         return jsonify({'error': 'Missing media ID'}), 400
     
     print(f'📺 Request: type={media_type}, id={media_id}, season={season}, episode={episode}')
     
+    # Try to convert season/episode to int if they're strings
+    try:
+        season = int(season)
+        episode = int(episode)
+    except ValueError:
+        season = 1
+        episode = 1
+    
     result = fetch_video(media_type, media_id, season, episode)
     
-    if result['success']:
+    if result.get('success'):
         return jsonify(result)
     else:
         return jsonify(result), 404
