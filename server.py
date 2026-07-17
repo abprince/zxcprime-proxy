@@ -2,151 +2,76 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
 import re
+import json
 
 app = Flask(__name__)
 CORS(app)
 
-DOMAINS = ['zxcprime.xyz', 'zxcstream.xyz']
-
-def fetch_video(media_type, media_id, season=1, episode=1):
-    """Fetch video URL directly from zxcprime embed pages"""
-    
-    for domain in DOMAINS:
-        try:
-            # Build embed URL (these often work better)
-            if media_type == 'movie':
-                url = f'https://{domain}/embed/movie/{media_id}'
-            else:
-                url = f'https://{domain}/embed/tv/{media_id}/{season}/{episode}'
-            
-            print(f'🔍 Fetching embed: {url}', flush=True)
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Referer': f'https://{domain}/',
-                'Origin': f'https://{domain}',
-            }
-            
-            response = requests.get(url, headers=headers, timeout=30)
-            
-            print(f'📄 Status: {response.status_code}', flush=True)
-            
-            if response.status_code == 200:
-                html = response.text
-                
-                # ✅ Save the HTML for debugging (first 1000 chars)
-                print(f'📄 HTML Preview: {html[:500]}', flush=True)
-                
-                # Try to find video URL patterns
-                patterns = [
-                    # Direct video URLs
-                    r'https?://[^"\'\s<>]+\.(mp4|m3u8|ts)[^"\'\s<>]*',
-                    # Cloudflare workers
-                    r'https?://[^"\'\s<>]*\.workers\.dev[^"\'\s<>]*',
-                    # Data attributes
-                    r'data-url=["\']([^"\']+)["\']',
-                    r'data-src=["\']([^"\']+)["\']',
-                    # JSON in scripts
-                    r'"url"\s*:\s*"([^"]+)"',
-                    r'"videoUrl"\s*:\s*"([^"]+)"',
-                    r'"src"\s*:\s*"([^"]+)"',
-                    # Iframe sources
-                    r'<iframe[^>]*src=["\']([^"\']+)["\'][^>]*>',
-                ]
-                
-                found_urls = []
-                for pattern in patterns:
-                    matches = re.findall(pattern, html)
-                    if matches:
-                        # Clean up matches (some may be tuples)
-                        clean_matches = []
-                        for match in matches:
-                            if isinstance(match, tuple):
-                                clean_matches.extend([m for m in match if m and isinstance(m, str)])
-                            else:
-                                clean_matches.append(match)
-                        
-                        # Filter for valid URLs
-                        valid_urls = [u for u in clean_matches if u and u.startswith('http')]
-                        if valid_urls:
-                            found_urls.extend(valid_urls)
-                            print(f'🎬 Found potential URLs: {valid_urls[:3]}', flush=True)
-                
-                # ✅ If we found any URLs, return the first one
-                if found_urls:
-                    # Prefer video files
-                    for url in found_urls:
-                        if any(ext in url for ext in ['.mp4', '.m3u8', '.ts', 'workers.dev']):
-                            return {
-                                'success': True,
-                                'videoUrl': url,
-                                'domain': domain,
-                                'source': 'direct'
-                            }
-                    # Fallback to first URL
-                    return {
-                        'success': True,
-                        'videoUrl': found_urls[0],
-                        'domain': domain,
-                        'source': 'fallback'
-                    }
-                
-                print(f'⚠️ No video found on {domain}', flush=True)
-                
-            else:
-                print(f'⚠️ Status {response.status_code} from {domain}', flush=True)
-                
-        except Exception as e:
-            print(f'❌ Error with {domain}: {e}', flush=True)
-            continue
-    
-    return {'success': False, 'error': 'No video found on any domain'}
-
-@app.route('/api/debug', methods=['GET'])
-def debug_page():
-    """Debug endpoint to fetch and return the raw HTML"""
-    domain = request.args.get('domain', 'zxcprime.xyz')
-    media_type = request.args.get('type', 'tv')
-    media_id = request.args.get('id', '94997')
-    season = request.args.get('season', '1')
-    episode = request.args.get('episode', '1')
-    
+# ✅ Working video sources
+def get_video_from_vidsrc(media_type, media_id, season=1, episode=1):
+    """Try vidsrc API"""
     try:
         if media_type == 'movie':
-            url = f'https://{domain}/embed/movie/{media_id}'
+            url = f'https://vidsrc.in/embed/movie/{media_id}'
         else:
-            url = f'https://{domain}/embed/tv/{media_id}/{season}/{episode}'
+            url = f'https://vidsrc.in/embed/tv/{media_id}/{season}/{episode}'
         
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Referer': f'https://{domain}/',
+            'Referer': 'https://vidsrc.in/',
         }
         
-        response = requests.get(url, headers=headers, timeout=30)
+        response = requests.get(url, headers=headers, timeout=15)
         
         if response.status_code == 200:
-            return jsonify({
-                'success': True,
-                'url': url,
-                'status': response.status_code,
-                'html_preview': response.text[:2000],
-                'html_length': len(response.text)
-            })
+            # Look for video URL
+            patterns = [
+                r'https?://[^"\'\s<>]+\.mp4[^"\'\s<>]*',
+                r'https?://[^"\'\s<>]+\.m3u8[^"\'\s<>]*',
+                r'https?://[^"\'\s<>]*\.cloudfront\.net[^"\'\s<>]*',
+            ]
+            for pattern in patterns:
+                matches = re.findall(pattern, response.text)
+                if matches:
+                    return matches[0]
+    except:
+        pass
+    return None
+
+def get_video_from_2embed(media_type, media_id, season=1, episode=1):
+    """Try 2embed API"""
+    try:
+        if media_type == 'movie':
+            url = f'https://www.2embed.cc/embed/movie/{media_id}'
         else:
-            return jsonify({
-                'success': False,
-                'url': url,
-                'status': response.status_code,
-                'error': 'Failed to fetch page'
-            }), 500
-            
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+            url = f'https://www.2embed.cc/embed/tv/{media_id}/{season}/{episode}'
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://www.2embed.cc/',
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            patterns = [
+                r'https?://[^"\'\s<>]+\.mp4[^"\'\s<>]*',
+                r'https?://[^"\'\s<>]+\.m3u8[^"\'\s<>]*',
+            ]
+            for pattern in patterns:
+                matches = re.findall(pattern, response.text)
+                if matches:
+                    return matches[0]
+    except:
+        pass
+    return None
+
+def get_video_from_zxcprime(media_type, media_id, season=1, episode=1):
+    """Try zxcprime embed - just return the embed URL"""
+    if media_type == 'movie':
+        return f'https://zxcprime.xyz/embed/movie/{media_id}'
+    else:
+        return f'https://zxcprime.xyz/embed/tv/{media_id}/{season}/{episode}'
 
 @app.route('/api/video', methods=['GET'])
 def get_video():
@@ -158,23 +83,66 @@ def get_video():
     if not media_id:
         return jsonify({'error': 'Missing media ID'}), 400
     
-    result = fetch_video(media_type, media_id, season, episode)
+    print(f'📺 Fetching: type={media_type}, id={media_id}', flush=True)
     
-    if result.get('success'):
-        return jsonify(result)
-    else:
-        return jsonify(result), 404
+    # ✅ Try each source
+    video_url = None
+    source = None
+    
+    # Try vidsrc
+    print('🔍 Trying vidsrc...', flush=True)
+    video_url = get_video_from_vidsrc(media_type, media_id, season, episode)
+    if video_url:
+        source = 'vidsrc'
+        print(f'✅ Found from vidsrc: {video_url}', flush=True)
+        return jsonify({
+            'success': True,
+            'videoUrl': video_url,
+            'source': source
+        })
+    
+    # Try 2embed
+    print('🔍 Trying 2embed...', flush=True)
+    video_url = get_video_from_2embed(media_type, media_id, season, episode)
+    if video_url:
+        source = '2embed'
+        print(f'✅ Found from 2embed: {video_url}', flush=True)
+        return jsonify({
+            'success': True,
+            'videoUrl': video_url,
+            'source': source
+        })
+    
+    # ✅ Fallback: Return zxcprime embed URL
+    print('🔍 Returning zxcprime embed URL...', flush=True)
+    embed_url = get_video_from_zxcprime(media_type, media_id, season, episode)
+    
+    return jsonify({
+        'success': False,
+        'error': 'No direct video URL found',
+        'embedUrl': embed_url,
+        'message': 'Use WebView to open embed URL',
+        'fallback': True
+    })
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'zxcprime proxy'})
+    return jsonify({
+        'status': 'ok',
+        'service': 'video proxy',
+        'version': '1.0'
+    })
 
 @app.route('/api/test', methods=['GET'])
 def test():
     return jsonify({
         'status': 'ok',
-        'message': 'Backend server is running!',
-        'domains': DOMAINS
+        'message': 'Server is running!',
+        'endpoints': {
+            'movie': '/api/video?type=movie&id=1273221',
+            'tv': '/api/video?type=tv&id=94997&season=1&episode=1'
+        },
+        'sources': ['vidsrc', '2embed', 'zxcprime']
     })
 
 if __name__ == '__main__':
